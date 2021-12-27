@@ -1,2 +1,1 @@
-(if (+ (syscall 1 1 "Hello there")
-       (syscall 1 1 "Hello again")) 0 0)
+(if (syscall 1 1 "Hello, World\n") 0 0)

@@ -36,7 +36,9 @@ main :: proc () {
 
 
 escaped_len :: proc (s: string) -> int {
-  return len(s) - 2
+  total := 0
+  for r in s[1 : len(s) - 1] { if r != '\\' {total += 1} }
+  return total 
 }
 
 literals := map[string]int{}
@@ -45,6 +47,7 @@ num_literals := 0
 compile_s_expr :: proc (val: value,  builder: ^strings.Builder) -> (ok: bool) {
   switch typed_value in val {
     case int:
+        strings.write_string(builder, "# push int\n")
         strings.write_string(builder, fmt.tprintf(
             "    push ${}\n" if abs(typed_value) <= int(max(i32)) else  "    mov  ${}, %%rax\n    push %%rax\n",
           typed_value))
@@ -54,6 +57,7 @@ compile_s_expr :: proc (val: value,  builder: ^strings.Builder) -> (ok: bool) {
           literals[typed_value] = num_literals
           num_literals += 1
         }
+        strings.write_string(builder, "# push string\n")
         strings.write_string(
           builder,
           fmt.tprintf(
@@ -67,6 +71,7 @@ compile_s_expr :: proc (val: value,  builder: ^strings.Builder) -> (ok: bool) {
       fmt.printf("ERROR: code is not data at the moment (lisp btw), so `{}` is not yet allowed.\n", typed_value)
       return false
     case s_expr:
+      strings.write_string(builder, "# start expression\n")
       switch head in typed_value[0] {
         case symbol:
           if head not_in symbol_table {
@@ -74,9 +79,10 @@ compile_s_expr :: proc (val: value,  builder: ^strings.Builder) -> (ok: bool) {
             return false
           }
 
-          strings.write_string(builder, fmt.tprintf("    push ${}\n", arg_len(typed_value)))
+          size := arg_len(typed_value) or_return
+          strings.write_string(builder, fmt.tprintf("    push ${}\n", size))
           for child_expr in typed_value[1:] do compile_s_expr(child_expr, builder) or_return
-          strings.write_string(builder, fmt.tprintf("    mov %%rsp, %%rbp\n    add ${}, %%rbp\n", arg_len(typed_value) * 8))
+          strings.write_string(builder, fmt.tprintf("    mov %%rsp, %%rbp\n    add ${}, %%rbp\n", size * 8))
 
           strings.write_string(builder, symbol_table[head])
         case string: 
@@ -95,20 +101,33 @@ compile_s_expr :: proc (val: value,  builder: ^strings.Builder) -> (ok: bool) {
   return true
 }
 
-
-arg_len :: proc (s: s_expr) -> int {
-  total := 0
-  for elem in s[1:] {
-    switch typed in elem {
-      case int:    total += 1
-      case string: total += 2
-      case symbol:
-      case s_expr: total += 1 // we assume all expressions evaluate to a single word
-      case: 
+arg_len :: proc (v: value) -> (l: int, ok: bool) {
+  switch typed in v {
+    case int:    return 1, true
+    case string: return 2, true
+    case symbol: return 0, false
+    case s_expr:
+    if len(typed) == 0 { return 0, false }
+    switch head in typed[0] {
+      case int:    return 0, false
+      case s_expr: return 0, false
+      case string:
+      if head == "if" { 
+        if len(typed) != 4 { return 0, false }
+        return arg_len(typed[2]) or_return, true
+      }
+      case symbol: 
+      total := 0
+      for elem in typed[1:] { 
+        total += arg_len(elem) or_return
+      }
+      return total, true
     }
-  }
-  return total
+  } 
+  return 0, false
 }
+
+
 
 symbol :: distinct string
 value :: union { int, symbol, string, s_expr }
@@ -153,17 +172,18 @@ if_asm :: proc (builder: ^strings.Builder, s: s_expr)->(ok: bool){
   @static label_num: int
   if len(s) == 4 {
     label_num += 1
+    label_num_cache := label_num
     strings.write_string(
       builder, 
-      fmt.tprintf("    jmp if_cond_%d\nif_false_%d:\n", label_num, label_num))
+      fmt.tprintf("    jmp if_cond_%d\nif_false_%d:\n", label_num_cache, label_num_cache))
     compile_s_expr(s[3], builder) or_return
     strings.write_string(
       builder, 
-      fmt.tprintf("    jmp if_end_%d\nif_true_%d:\n", label_num, label_num))
+      fmt.tprintf("    jmp if_end_%d\nif_true_%d:\n", label_num_cache, label_num_cache))
     compile_s_expr(s[2], builder) or_return
     strings.write_string(
       builder, 
-      fmt.tprintf("    jmp if_end_%d\nif_cond_%d:\n", label_num, label_num))
+      fmt.tprintf("    jmp if_end_%d\nif_cond_%d:\n", label_num_cache, label_num_cache))
     compile_s_expr(s[1], builder) or_return
     strings.write_string(
       builder,
@@ -173,7 +193,7 @@ if_asm :: proc (builder: ^strings.Builder, s: s_expr)->(ok: bool){
     je if_false_%d
     jmp if_true_%d
 if_end_%d:
-`, label_num, label_num, label_num))
+`, label_num_cache, label_num_cache, label_num_cache))
     return true
   } else {
     return false
