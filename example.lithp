@@ -1,1 +1,2 @@
-(+ 1 2 3 (/ 49 7) (- 0 13))
+(if (+ (syscall 1 1 "Hello there")
+       (syscall 1 1 "Hello again")) 0 0)

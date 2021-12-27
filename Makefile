@@ -1,5 +1,7 @@
+default: test
+
 test: example
-	./example
+	@./example
 
 example: example.o
 	ld example.o -o example

@@ -18,78 +18,96 @@ main :: proc () {
     return
   }
   if tree, ok := parse_tree(&scanner); ok {
-    for expr in tree {
-      fmt.print(program_header)
-      fmt.print(compile_s_expr(expr) or_else "invalid\n")
-      fmt.print(program_footer)
+    builder := strings.Builder{}
+    strings.init_builder(&builder)
 
+    for expr in tree do if !compile_s_expr(expr, &builder) { os.exit(1) }
+
+    fmt.print(program_header)
+    fmt.print(strings.to_string(builder))
+    fmt.print(program_footer)
+    for literal, i in literals {
+      fmt.printf("string_literal_{}: .ascii {}\n", i, literal)
     }
-    // fmt.println("Ok")
   } else {
     fmt.println("Parsing error")
   }
 }
 
 
-// [false_code][true_code][cond][if]
+escaped_len :: proc (s: string) -> int {
+  return len(s) - 2
+}
 
+literals := map[string]int{}
+num_literals := 0
 
-compile_s_expr :: proc (val: value, short_form := false) -> (asm_string: string, ok: bool) {
-  result := strings.Builder{}
-  strings.init_builder(&result)
-
+compile_s_expr :: proc (val: value,  builder: ^strings.Builder) -> (ok: bool) {
   switch typed_value in val {
     case int:
-      if typed_value > int(max(i32)) {
-        strings.write_string_builder(
-          &result, 
+        strings.write_string(builder, fmt.tprintf(
+            "    push ${}\n" if abs(typed_value) <= int(max(i32)) else  "    mov  ${}, %%rax\n    push %%rax\n",
+          typed_value))
+    case string:
+      if typed_value[0] == '"' {
+        if typed_value not_in literals {
+          literals[typed_value] = num_literals
+          num_literals += 1
+        }
+        strings.write_string(
+          builder,
           fmt.tprintf(
-            "    mov $%d, %%rax\n    push %%rax\n",
-            typed_value))
+            "    push $string_literal_{}\n    push ${}\n", 
+            literals[typed_value], escaped_len(typed_value)))
       } else {
-        strings.write_string_builder(
-          &result, 
-          fmt.tprintf(
-            "    push $%d\n",
-            typed_value))
+        fmt.printf("ERROR: code is not data at the moment (lisp btw), so `{}` is not yet allowed.\n", typed_value)
+        return false
       }
-    case string: 
-      fmt.println("ERR: unsupported string")
-      return "", false
     case symbol:
-      strings.write_string_builder(
-        &result,
-        symbol_table[typed_value][0 if short_form else 1])
+      fmt.printf("ERROR: code is not data at the moment (lisp btw), so `{}` is not yet allowed.\n", typed_value)
+      return false
     case s_expr:
-      //fmt.println(typed_value)
-      switch car in typed_value[0] {
-        case string:
-          if car in special_ops {
-            strings.write_string_builder(
-              &result,
-              special_ops[car](typed_value) or_return)
-          } else {
-            return "", false
-          }
+      switch head in typed_value[0] {
         case symbol:
-          for i := len(typed_value) - 1; i >= 0; i -= 1 {
-            if i == 0 && len(typed_value) != 3 {
-              strings.write_string_builder(
-                &result,
-                fmt.tprintf("    mov $%d, %%rdi\n", len(typed_value) - 1))
-            }
-            strings.write_string_builder(
-              &result,
-              compile_s_expr(typed_value[i], len(typed_value) == 3) or_return)
-          } 
-        case int:    fmt.println("ERROR: unsupported operator of type `int`"); return "", false 
-        case s_expr: fmt.println("ERROR: unsupported operator of type `s_expr`"); return "", false
-        case:        fmt.println("ERROR: unsupported operator of type `nil`"); return "", false 
+          if head not_in symbol_table {
+            fmt.printf("ERROR: unknown symbol `{}`\n")
+            return false
+          }
+
+          strings.write_string(builder, fmt.tprintf("    push ${}\n", arg_len(typed_value)))
+          for child_expr in typed_value[1:] do compile_s_expr(child_expr, builder) or_return
+          strings.write_string(builder, fmt.tprintf("    mov %%rsp, %%rbp\n    add ${}, %%rbp\n", arg_len(typed_value) * 8))
+
+          strings.write_string(builder, symbol_table[head])
+        case string: 
+          if head in special_ops {
+            special_ops[head](builder, typed_value)
+          } else {
+            fmt.printf("ERROR: `{}` cannot be called.", head); return false
+          }
+        case s_expr: fmt.printf("ERROR: `{}` cannot be called.", head); return false
+        case int:    fmt.printf("ERROR: `{}` cannot be called.", head); return false
+        case :       fmt.printf("ERROR: `{}` cannot be called.", head); return false
       }
-      
+    case: fmt.printf("ERROR: `{}` cannot be compiled.", typed_value)
   }
 
-  return strings.to_string(result), true
+  return true
+}
+
+
+arg_len :: proc (s: s_expr) -> int {
+  total := 0
+  for elem in s[1:] {
+    switch typed in elem {
+      case int:    total += 1
+      case string: total += 2
+      case symbol:
+      case s_expr: total += 1 // we assume all expressions evaluate to a single word
+      case: 
+    }
+  }
+  return total
 }
 
 symbol :: distinct string
@@ -119,75 +137,72 @@ parse_tree :: proc (scanner: ^scan.Scanner) -> (result: s_expr, ok: bool) {
   return call_stack[0][:], true
 }
 
-symbol_table := map[symbol][2]string {
-  "+" = {"    pop %rax\n    pop %rbx\n    add %rbx, %rax\n    push %rax\n", "    call builtin_add\n    push %rax\n"},
-  "-" = {"    pop %rax\n    pop %rbx\n    sub %rbx, %rax\n    push %rax\n", "    call builtin_sub\n    push %rax\n"},
-  "/" = {"    pop %rax\n    pop %rbx\n    div %rbx, %rax\n    push %rax\n", "    call builtin_div\n    push %rax\n"},
-  "*" = {"    pop %rax\n    pop %rbx\n    mul %rbx\n    push %rax\n", "    call builtin_mul\n    push %rax\n"},
+symbol_table := map[symbol]string {
+  "+" =       "    call builtin_add\n    push %rax\n",
+  "-" =       "    call builtin_sub\n    push %rax\n",
+  "/" =       "    call builtin_div\n    push %rax\n",
+  "*" =       "    call builtin_mul\n    push %rax\n",
+  "syscall" = "    call builtin_syscall\n    push %rax\n",
 }
 
-special_ops := map[string]proc(s_expr)-> (string, bool) {
-  "if" = generate_if_asm,
+special_ops := map[string]proc(^strings.Builder, s_expr)-> bool {
+  "if" = if_asm,
 }
 
-generate_if_asm :: proc (s: s_expr)->(result: string, ok: bool){
+if_asm :: proc (builder: ^strings.Builder, s: s_expr)->(ok: bool){
   @static label_num: int
   if len(s) == 4 {
     label_num += 1
-    return fmt.tprintf(`
-  jmp if_cond_%d
-if_false_%d:
-%s
-    jmp if_end_%d
-if_true_%d:
-%s
-    jmp if_end_%d
-if_cond_%d:
-%s
-    pop %%rax
+    strings.write_string(
+      builder, 
+      fmt.tprintf("    jmp if_cond_%d\nif_false_%d:\n", label_num, label_num))
+    compile_s_expr(s[3], builder) or_return
+    strings.write_string(
+      builder, 
+      fmt.tprintf("    jmp if_end_%d\nif_true_%d:\n", label_num, label_num))
+    compile_s_expr(s[2], builder) or_return
+    strings.write_string(
+      builder, 
+      fmt.tprintf("    jmp if_end_%d\nif_cond_%d:\n", label_num, label_num))
+    compile_s_expr(s[1], builder) or_return
+    strings.write_string(
+      builder,
+      fmt.tprintf(
+`    pop %%rax
     cmp $0, %%rax
     je if_false_%d
     jmp if_true_%d
 if_end_%d:
-`,  label_num, label_num, 
-        compile_s_expr(s[3]) or_return,
-        label_num, label_num,
-        compile_s_expr(s[2]) or_return,
-        label_num, label_num,
-        compile_s_expr(s[1]) or_return,
-        label_num, label_num, label_num), true
+`, label_num, label_num, label_num))
+    return true
   } else {
-    return "", false
+    return false
   }
-}
-
-single_instruction :: proc (name, op_line: string) -> string {
-  return fmt.tprintf(
-`# instruction %s
-    pop %%rax
-    pop %%rbx
-    %s
-    push %%rax
-`, name, op_line)
 }
 
 repeated_instruction :: proc (name, op_line: string) -> string {
   return fmt.tprintf(
-`builtin_%s:
-    pop %%rbp    # get back the return address
-    cmp $0, %%rdi
-    jle bad_call
+`
+builtin_{}:
+    pop %%r11           # old instruction pointer
+    mov %%rbp, %%rsi
+    sub $8, %%rsi
 
-    pop %%rax
-    dec %%rdi
+    mov (%%rsi), %%rax
+{}_loop: 
+    sub $8, %%rsi
+    cmp %%rsp, %%rsi    # if we go over rsp, end
+    jl {}_end
 
-    jz . + 8
-    pop %%rbx
-    %s
-    jmp . - 9
-    jmp *%%rbp    #return
-`, 
-    name, op_line)
+    mov (%%rsi), %%rbx  # take value from the stack
+    {}                  # update the accumulator
+
+    jmp {}_loop
+{}_end:
+    mov %%rbp, %%rsp    # update stack pointer
+    add $8, %%rsp       # throw away the old length
+    jmp *%%r11          # ret
+`, name, name, name, op_line, name, name )
 }
 
 
@@ -208,6 +223,45 @@ bad_call:
     mov $60, %%rax
     mov $1, %%rdi
     syscall
+
+builtin_syscall:
+    pop %%r11           # instruction pointer
+    mov (%%rbp), %%rax
+
+    cmp $0, %%rax
+    je bad_call
+
+    cmp $1, %%rax   # TODO: put a jump table here
+    je builtin_syscall_0
+    cmp $2, %%rax
+    je builtin_syscall_1
+    cmp $3, %%rax
+    je builtin_syscall_2
+    cmp $4, %%rax
+    je builtin_syscall_3
+    cmp $5, %%rax
+    je builtin_syscall_4
+    cmp $6, %%rax
+    je builtin_syscall_5
+    cmp $7, %%rax
+    pop %%r9
+builtin_syscall_5:
+    pop %%r8
+builtin_syscall_4:
+    pop %%r10
+builtin_syscall_3:
+    pop %%rdx
+builtin_syscall_2:
+    pop %%rsi
+builtin_syscall_1:
+    pop %%rdi
+builtin_syscall_0:
+    pop %%rax
+    add $8, %%rsp   # throw away the list length
+    push %%r11      # push the instruction pointer
+    syscall
+    ret
+
 _start:
 `, 
 repeated_instruction("add", "add %rbx, %rax"),
