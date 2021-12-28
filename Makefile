@@ -1,16 +1,19 @@
 default: test
 
-test: example
-	@./example
+clean:
+	${RM} ./hello.asm ./hello.o ./hello bin/lithp
 
-example: example.o
-	ld example.o -o example
+test: hello
+	@./hello
 
-example.o: example.asm
-	as example.asm -o example.o
+hello: hello.o
+	ld hello.o -o hello
 
-example.asm: bin/lithp example.lithp
-	bin/lithp example.lithp > example.asm
+hello.o: hello.asm
+	as hello.asm -o hello.o
+
+hello.asm: bin/lithp hello.lithp
+	bin/lithp hello.lithp > hello.asm
 
 bin/lithp: src/*
 	odin build src -out:bin/lithp

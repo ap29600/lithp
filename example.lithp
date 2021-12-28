@@ -1,1 +1,0 @@
-(if (syscall 1 1 "Hello, World\n") 0 0)

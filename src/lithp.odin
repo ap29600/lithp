@@ -24,6 +24,13 @@ main :: proc () {
     for expr in tree do if !compile_s_expr(expr, &builder) { os.exit(1) }
 
     fmt.print(program_header)
+    fmt.print(builtin_procs)
+    fmt.println(repeated_instruction("add", "add %rbx, %rax"))
+    fmt.println(repeated_instruction("sub", "sub %rbx, %rax"))
+    fmt.println(repeated_instruction("div", "div %rbx, %rax"))
+    fmt.println(repeated_instruction("mul", "imul %rbx"))
+    fmt.println("_start:")
+
     fmt.print(strings.to_string(builder))
     fmt.print(program_footer)
     for literal, i in literals {
@@ -68,8 +75,7 @@ compile_s_expr :: proc (val: value,  builder: ^strings.Builder) -> (ok: bool) {
         return false
       }
     case symbol:
-      fmt.printf("ERROR: code is not data at the moment (lisp btw), so `{}` is not yet allowed.\n", typed_value)
-      return false
+      strings.write_string(builder, fmt.tprintf("    push ${}\n", symbol_table[typed_value] ))
     case s_expr:
       strings.write_string(builder, "# start expression\n")
       switch head in typed_value[0] {
@@ -79,12 +85,12 @@ compile_s_expr :: proc (val: value,  builder: ^strings.Builder) -> (ok: bool) {
             return false
           }
 
-          size := arg_len(typed_value) or_return
-          strings.write_string(builder, fmt.tprintf("    push ${}\n", size))
+          size, ok_size := arg_len(typed_value)
+          if !ok_size {fmt.println("ERROR computing size"); return false}
+          size -= 1
           for child_expr in typed_value[1:] do compile_s_expr(child_expr, builder) or_return
-          strings.write_string(builder, fmt.tprintf("    mov %%rsp, %%rbp\n    add ${}, %%rbp\n", size * 8))
-
-          strings.write_string(builder, symbol_table[head])
+          strings.write_string(builder, fmt.tprintf("    push ${}\n", size * 8))
+          strings.write_string(builder, fmt.tprintf("    call {}\n", symbol_table[head]))
         case string: 
           if head in special_ops {
             special_ops[head](builder, typed_value)
@@ -105,7 +111,7 @@ arg_len :: proc (v: value) -> (l: int, ok: bool) {
   switch typed in v {
     case int:    return 1, true
     case string: return 2, true
-    case symbol: return 0, false
+    case symbol: return 1, true 
     case s_expr:
     if len(typed) == 0 { return 0, false }
     switch head in typed[0] {
@@ -116,10 +122,16 @@ arg_len :: proc (v: value) -> (l: int, ok: bool) {
         if len(typed) != 4 { return 0, false }
         return arg_len(typed[2]) or_return, true
       }
-      case symbol: 
+      case symbol:
       total := 0
-      for elem in typed[1:] { 
-        total += arg_len(elem) or_return
+      switch head {
+        case "+", "*", "-", "/":
+          total = len(typed)
+        case "quote", "cons", "call", "syscall":
+          total = 1
+          for elem in typed[1:] { 
+            total += arg_len(elem) or_return
+          }
       }
       return total, true
     }
@@ -136,12 +148,18 @@ s_expr :: []value
 parse_tree :: proc (scanner: ^scan.Scanner) -> (result: s_expr, ok: bool) {
   call_stack := [dynamic][dynamic]value{{}}
 
+  minus_loc := max(int)
   for scan.scan(scanner) != scan.EOF {
     tok := scan.token_text(scanner)
     num, isnum := strconv.parse_int(tok)
     switch {
       case isnum:
-        append(&call_stack[len(call_stack) - 1], num)
+        if minus_loc == scan.position(scanner).offset - 1 {
+          last_frame := call_stack[len(call_stack) - 1]
+          last_frame[len(last_frame) - 1] = -num
+        } else {
+          append(&call_stack[len(call_stack) - 1], num)
+        }
       case tok == "(":
         append(&call_stack, [dynamic]value{})
       case tok == ")":
@@ -149,6 +167,7 @@ parse_tree :: proc (scanner: ^scan.Scanner) -> (result: s_expr, ok: bool) {
         append(&call_stack[len(call_stack) - 2], s_expr(pop(&call_stack)[:]))
       case symbol(tok) in symbol_table:
         append(&call_stack[len(call_stack) - 1], symbol(tok))
+        if tok == "-" {minus_loc = scan.position(scanner).offset}
       case:
         append(&call_stack[len(call_stack) - 1], tok)
     }
@@ -157,11 +176,15 @@ parse_tree :: proc (scanner: ^scan.Scanner) -> (result: s_expr, ok: bool) {
 }
 
 symbol_table := map[symbol]string {
-  "+" =       "    call builtin_add\n    push %rax\n",
-  "-" =       "    call builtin_sub\n    push %rax\n",
-  "/" =       "    call builtin_div\n    push %rax\n",
-  "*" =       "    call builtin_mul\n    push %rax\n",
-  "syscall" = "    call builtin_syscall\n    push %rax\n",
+  "+" =       "builtin_add",
+  "-" =       "builtin_sub",
+  "/" =       "builtin_div",
+  "*" =       "builtin_mul",
+  "syscall" = "builtin_syscall",
+  "quote" =    "nop", 
+  "cons" =    "builtin_cons", 
+  "call" =    "builtin_call", 
+  "crash" =   "bad_call", 
 }
 
 special_ops := map[string]proc(^strings.Builder, s_expr)-> bool {
@@ -205,8 +228,14 @@ repeated_instruction :: proc (name, op_line: string) -> string {
 `
 builtin_{}:
     pop %%r11           # old instruction pointer
-    mov %%rbp, %%rsi
-    sub $8, %%rsi
+    pop %%rsi           # len in bytes
+
+    cmp $0, %%rsi
+    je bad_call
+
+    add %%rsp, %%rsi    # pointer to after last value (new stack)
+    mov %%rsi, %%rbp
+    sub $8, %%rsi       # pointer to last value
 
     mov (%%rsi), %%rax
 {}_loop: 
@@ -220,75 +249,14 @@ builtin_{}:
     jmp {}_loop
 {}_end:
     mov %%rbp, %%rsp    # update stack pointer
-    add $8, %%rsp       # throw away the old length
+    push %%rax
     jmp *%%r11          # ret
 `, name, name, name, op_line, name, name )
 }
 
+builtin_procs := string(#load("builtin_procs.asm"))
 
-program_header := fmt.tprintf(
-`.global _start
-.text
-
-%s
-%s
-%s
-%s
-bad_call:
-    mov $1, %%rax
-    mov $1, %%rdi
-    mov $error_string, %%rsi
-    mov $51, %%rdx
-    syscall
-    mov $60, %%rax
-    mov $1, %%rdi
-    syscall
-
-builtin_syscall:
-    pop %%r11           # instruction pointer
-    mov (%%rbp), %%rax
-
-    cmp $0, %%rax
-    je bad_call
-
-    cmp $1, %%rax   # TODO: put a jump table here
-    je builtin_syscall_0
-    cmp $2, %%rax
-    je builtin_syscall_1
-    cmp $3, %%rax
-    je builtin_syscall_2
-    cmp $4, %%rax
-    je builtin_syscall_3
-    cmp $5, %%rax
-    je builtin_syscall_4
-    cmp $6, %%rax
-    je builtin_syscall_5
-    cmp $7, %%rax
-    pop %%r9
-builtin_syscall_5:
-    pop %%r8
-builtin_syscall_4:
-    pop %%r10
-builtin_syscall_3:
-    pop %%rdx
-builtin_syscall_2:
-    pop %%rsi
-builtin_syscall_1:
-    pop %%rdi
-builtin_syscall_0:
-    pop %%rax
-    add $8, %%rsp   # throw away the list length
-    push %%r11      # push the instruction pointer
-    syscall
-    ret
-
-_start:
-`, 
-repeated_instruction("add", "add %rbx, %rax"),
-repeated_instruction("sub", "sub %rbx, %rax"),
-repeated_instruction("div", "div %rbx, %rax"),
-repeated_instruction("mul", "imul %rbx"),
-)
+program_header := " .global _start\n.text\n"
 
 
 program_footer :: `
