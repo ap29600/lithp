@@ -4,16 +4,13 @@ clean:
 	${RM} ./hello.asm ./hello.o ./hello bin/lithp
 
 test: hello
-	@./hello
+	./hello
 
-hello: hello.o
-	ld hello.o -o hello
+hello: hello.asm
+	fasm hello.asm
 
-hello.o: hello.asm
-	as hello.asm -o hello.o
+hello.asm: bin/lithp hello.lithp src/program_header.asm
+	bin/lithp hello.lithp
 
-hello.asm: bin/lithp hello.lithp
-	bin/lithp hello.lithp > hello.asm
-
-bin/lithp: src/*
-	odin build src -out:bin/lithp
+bin/lithp: src/lithp.odin
+	odin build src -out:bin/lithp -debug -opt:0 -define:bake_header=false$(EXTRA_FLAGS)
